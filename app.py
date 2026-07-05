@@ -5,10 +5,11 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from rag_pipeline import (
+from rag import (
     RagArtifacts,
     answer_question,
     build_retriever,
+    build_query_artifacts,
     file_signature,
     load_knowledge_base_manifest,
     safe_namespace,
@@ -155,11 +156,11 @@ def _hydrate_existing_knowledge_base() -> None:
 
     pdf_path = Path(manifest["pdf_path"])
     namespace = manifest["namespace"]
-    if not pdf_path.exists() or not namespace:
+    if not namespace:
         return
 
     try:
-        artifacts = build_retriever(pdf_path, namespace)
+        artifacts = build_query_artifacts(namespace)
     except Exception:
         return
 
@@ -200,8 +201,9 @@ with st.sidebar:
         st.success("Knowledge base connected")
         st.write(st.session_state.uploaded_pdf_name)
         st.write(st.session_state.uploaded_namespace)
-        st.write(f"Loaded pages: {st.session_state.artifacts.page_count}")
         st.write(f"Chunks indexed: {st.session_state.artifacts.source_count}")
+        if st.session_state.artifacts.page_count is not None:
+            st.write(f"Loaded pages: {st.session_state.artifacts.page_count}")
     else:
         st.info("No knowledge base connected yet.")
 

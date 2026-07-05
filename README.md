@@ -4,7 +4,9 @@
 
 ## Flow
 
-Streamlit UI -> Upload PDF -> PyPDFLoader -> TokenTextSplitter -> OpenAI Embeddings (text-embedding-3-small) -> Pinecone -> ParentDocumentRetriever -> MultiQueryRetriever -> OpenAI Chat Model (gpt-4o-mini) -> Teacher-Style Answer
+Ingestion flow: PDF -> PyPDFLoader -> TokenTextSplitter -> OpenAI Embeddings (text-embedding-3-small) -> Pinecone
+
+Query flow: Streamlit UI -> PineconeVectorStore -> MultiQueryRetriever -> OpenAI Chat Model (gpt-4o-mini) -> Teacher-Style Answer
 
 The retrieval step is now wrapped in a LangChain `@tool`, and answer generation uses a small LCEL chain so the code stays simple while still being easy to extend into agents later.
 
@@ -24,9 +26,33 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### One-time ingestion
+
+Before deploying or after uploading a new PDF, run:
+
+```bash
+python ingest.py --pdf /path/to/book.pdf
+```
+
+If you already uploaded a PDF through the app, `python ingest.py` will reuse the latest PDF found in `uploads/`.
+
+### Railway deployment
+
+Add these variables in Railway instead of committing `.env`:
+
+```bash
+OPENAI_API_KEY=xxxxx
+PINECONE_API_KEY=xxxxx
+PINECONE_INDEX_NAME=book-assistant-index
+PINECONE_CLOUD=aws
+PINECONE_REGION=us-east-1
+```
+
+The app uses `Procfile` to launch Streamlit on Railway.
+
 ## Notes
 
-- The app creates a Pinecone index if it does not already exist. The default embedding dimension is 1536 for `text-embedding-3-small`.
+- The app creates a Pinecone index if it does not already exist.
 - Uploaded PDFs are stored locally in `uploads/` before parsing.
 - The PDF parser uses `PyPDFLoader`, so Tesseract is not required.
 - The answer prompt is tuned for clear, supportive, student-friendly explanations.
