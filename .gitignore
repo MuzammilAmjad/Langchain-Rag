@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+uploads/
+Artificial Intelligence, Machine Learning, and Deep Learning.pdf
+Lecture-AI.pdf
