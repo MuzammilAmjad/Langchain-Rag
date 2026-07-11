@@ -12,3 +12,6 @@ python-dotenv==1.2.2
 streamlit==1.58.0
 tiktoken==0.13.0
 unstructured==0.23.1
+fastapi
+uvicorn[standard]
+python-multipart
