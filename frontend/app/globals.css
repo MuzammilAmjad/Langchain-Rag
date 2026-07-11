@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  /* Brand / functional */
+  --color-black: #000000;
+  --color-white: #ffffff;
+  --color-accent: #10a37f;
+  --color-danger: #f27474;
+  --color-warn: #fec553;
+
+  /* Neutrals (dark theme) */
+  --color-rail: #1e1f22;
+  --color-panel: #282a2e;
+  --color-border: #3f424a;
+  --color-muted-bg: #4b4f5b;
+  --color-text-muted: #858b9d;
+  --color-text-faint: #ababab;
+
+  /* Light-theme neutrals, kept for later if you add a toggle */
+  --color-mint: #d8efe9;
+  --color-light-border: #eaeaea;
+  --color-light-bg: #f4f4f4;
+}
+
+html, body {
+  background-color: var(--color-rail);
+  color: var(--color-white);
+  height: 100%;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+/* Typography scale from the UI kit */
+.text-h1 { font-weight: 700; font-size: 20px; line-height: 24px; }
+.text-sub1 { font-weight: 600; font-size: 14px; line-height: 20px; }
+.text-sub2 { font-weight: 600; font-size: 12px; line-height: 16px; }
+.text-body1 { font-weight: 400; font-size: 12px; line-height: 16px; }
+.text-label1 { font-weight: 400; font-size: 10px; line-height: 12px; }

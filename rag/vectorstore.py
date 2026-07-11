@@ -4,7 +4,6 @@ import logging
 import os
 
 from dotenv import load_dotenv
-import streamlit as st
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
@@ -23,32 +22,46 @@ class RagError(RuntimeError):
     """Raised for any recoverable failure in the RAG pipeline, safe to show to the user."""
 
 
-@st.cache_resource(show_spinner=False)
+# Module-level singletons — replaces Streamlit's st.cache_resource so this
+# module has no framework dependency. Same "build once, reuse" behavior.
+_embeddings: OpenAIEmbeddings | None = None
+_llm: ChatOpenAI | None = None
+_pinecone_index = None
+
+
 def get_embeddings() -> OpenAIEmbeddings:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RagError("OPENAI_API_KEY is missing.")
-    return OpenAIEmbeddings(
-        model=EMBEDDING_MODEL,
-        openai_api_key=api_key,
-        dimensions=EMBEDDING_DIMENSION,
-    )
+    global _embeddings
+    if _embeddings is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RagError("OPENAI_API_KEY is missing.")
+        _embeddings = OpenAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            openai_api_key=api_key,
+            dimensions=EMBEDDING_DIMENSION,
+        )
+    return _embeddings
 
 
-@st.cache_resource(show_spinner=False)
 def get_llm() -> ChatOpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RagError("OPENAI_API_KEY is missing.")
-    return ChatOpenAI(
-        model=LLM_MODEL,
-        openai_api_key=api_key,
-        temperature=0.2,
-    )
+    global _llm
+    if _llm is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RagError("OPENAI_API_KEY is missing.")
+        _llm = ChatOpenAI(
+            model=LLM_MODEL,
+            openai_api_key=api_key,
+            temperature=0.2,
+        )
+    return _llm
 
 
-@st.cache_resource(show_spinner=False)
 def get_pinecone_index():
+    global _pinecone_index
+    if _pinecone_index is not None:
+        return _pinecone_index
+
     api_key = os.getenv("PINECONE_API_KEY")
     if not api_key:
         raise RagError("PINECONE_API_KEY is missing.")
@@ -67,7 +80,8 @@ def get_pinecone_index():
                 metric="cosine",
                 spec=ServerlessSpec(cloud=cloud, region=region),
             )
-        return client.Index(index_name)
+        _pinecone_index = client.Index(index_name)
+        return _pinecone_index
     except PineconeException as exc:
         raise RagError(f"Could not initialize Pinecone index: {exc}") from exc
 

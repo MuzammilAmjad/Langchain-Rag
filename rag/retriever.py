@@ -186,15 +186,3 @@ def build_retriever(pdf_path: Path, namespace: str, force_rebuild: bool = False)
         source_count=len(chunks),
         page_count=len(raw_documents),
     )
-
-
-def get_or_build_retriever(pdf_path: Path, namespace: str) -> RagArtifacts:
-    import streamlit as st
-
-    indexed = st.session_state.setdefault("indexed_namespaces", {})
-    if namespace in indexed:
-        return indexed[namespace]
-
-    artifacts = build_retriever(pdf_path, namespace)
-    indexed[namespace] = artifacts
-    return artifacts
