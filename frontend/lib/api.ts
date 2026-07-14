@@ -55,8 +55,26 @@ export async function deleteDocument(namespace: string): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete document");
 }
 
-export async function getChatHistory(): Promise<ChatMessageT[]> {
-  const res = await fetch(`${API_URL}/api/chat/history`, { cache: "no-store" });
+export interface ConversationInfo {
+  id: number;
+  title: string;
+  updated_at: string;
+}
+
+export async function listConversations(): Promise<ConversationInfo[]> {
+  const res = await fetch(`${API_URL}/api/conversations`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load conversations");
+  return res.json();
+}
+
+export async function createConversation(): Promise<ConversationInfo> {
+  const res = await fetch(`${API_URL}/api/conversations`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to create conversation");
+  return res.json();
+}
+
+export async function getConversationMessages(id: number): Promise<ChatMessageT[]> {
+  const res = await fetch(`${API_URL}/api/conversations/${id}/messages`, { cache: "no-store" });
   if (!res.ok) throw new Error("Failed to load chat history");
   const rows: { role: string; content: string; sources: SourceCitation[] | null }[] = await res.json();
   return rows.map((r) => ({
@@ -66,9 +84,19 @@ export async function getChatHistory(): Promise<ChatMessageT[]> {
   }));
 }
 
-export async function clearChatHistory(): Promise<void> {
-  const res = await fetch(`${API_URL}/api/chat/history`, { method: "DELETE" });
-  if (!res.ok) throw new Error("Failed to clear chat");
+export async function deleteConversation(id: number): Promise<void> {
+  const res = await fetch(`${API_URL}/api/conversations/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete conversation");
+}
+
+export async function renameConversation(id: number, title: string): Promise<ConversationInfo> {
+  const res = await fetch(`${API_URL}/api/conversations/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error("Failed to rename conversation");
+  return res.json();
 }
 
 type StreamEvent =
@@ -79,6 +107,7 @@ type StreamEvent =
 
 export async function streamChat(
   question: string,
+  conversationId: number,
   handlers: {
     onToken: (t: string) => void;
     onSources: (s: SourceCitation[]) => void;
@@ -89,7 +118,7 @@ export async function streamChat(
   const res = await fetch(`${API_URL}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, conversation_id: conversationId }),
   });
 
   if (!res.ok || !res.body) {

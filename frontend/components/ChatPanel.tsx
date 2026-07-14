@@ -6,24 +6,33 @@ import {
   Search,
   MessageSquareText,
   Zap,
-  TriangleAlert,
   Sparkles,
   Mic,
   Menu,
   X,
   ChevronUp,
   ChevronDown,
-  Trash2,
+  MoreHorizontal,
 } from "lucide-react";
-import { streamChat, getChatHistory, clearChatHistory, ChatMessageT } from "@/lib/api";
+import { streamChat, getConversationMessages, ChatMessageT } from "@/lib/api";
 import MessageBubble from "@/components/MessageBubble";
 
 export default function ChatPanel({
+  activeConversationId,
+  activeConversationTitle,
   hasActiveDocument,
   onOpenMenu,
+  onRenameConversation,
+  onDeleteConversation,
+  onConversationUpdated,
 }: {
+  activeConversationId: number | null;
+  activeConversationTitle: string;
   hasActiveDocument: boolean;
   onOpenMenu: () => void;
+  onRenameConversation: (id: number, title: string) => Promise<void>;
+  onDeleteConversation: (id: number) => Promise<void>;
+  onConversationUpdated: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessageT[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
@@ -35,13 +44,20 @@ export default function ChatPanel({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [matchCursor, setMatchCursor] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    getChatHistory()
+    if (activeConversationId == null) {
+      setMessages([]);
+      setLoadingHistory(false);
+      return;
+    }
+    setLoadingHistory(true);
+    getConversationMessages(activeConversationId)
       .then(setMessages)
       .catch(() => setMessages([]))
       .finally(() => setLoadingHistory(false));
-  }, []);
+  }, [activeConversationId]);
 
   useEffect(() => {
     if (!searchOpen) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -65,13 +81,13 @@ export default function ChatPanel({
 
   const send = async () => {
     const question = input.trim();
-    if (!question || streaming || !hasActiveDocument) return;
+    if (!question || streaming || !hasActiveDocument || activeConversationId == null) return;
 
     setMessages((prev) => [...prev, { role: "user", content: question }, { role: "assistant", content: "" }]);
     setInput("");
     setStreaming(true);
 
-    await streamChat(question, {
+    await streamChat(question, activeConversationId, {
       onToken: (t) =>
         setMessages((prev) => {
           const next = [...prev];
@@ -90,19 +106,50 @@ export default function ChatPanel({
           next[next.length - 1] = { ...next[next.length - 1], content: `⚠️ ${message}` };
           return next;
         }),
-      onDone: () => {},
+      onDone: () => {
+        onConversationUpdated();
+      },
     });
 
     setStreaming(false);
   };
 
-  const clearChat = async () => {
-    try {
-      await clearChatHistory();
-      setMessages([]);
-    } catch {
-      // no-op — leave existing messages visible if the clear failed
+  const handleRename = () => {
+    if (activeConversationId == null) return;
+    const newTitle = window.prompt("Rename conversation:", activeConversationTitle);
+    if (newTitle !== null && newTitle.trim() !== "") {
+      onRenameConversation(activeConversationId, newTitle.trim());
     }
+  };
+
+  const handleDelete = async () => {
+    if (activeConversationId == null) return;
+    if (window.confirm("Are you sure you want to delete this conversation?")) {
+      await onDeleteConversation(activeConversationId);
+    }
+  };
+
+  const handleExport = () => {
+    if (messages.length === 0) return;
+    const mdContent = messages
+      .map((m) => {
+        const roleLabel = m.role === "user" ? "### You" : "### Assistant";
+        let content = `${roleLabel}\n\n${m.content}\n`;
+        if (m.sources && m.sources.length > 0) {
+          content += `\n**Sources:**\n` + m.sources.map((s) => `- [${s.id}] ${s.source} (Page ${s.page}): "${s.excerpt}"`).join("\n") + "\n";
+        }
+        return content;
+      })
+      .join("\n---\n\n");
+
+    const blob = new Blob([mdContent], { type: "text/markdown;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", `${activeConversationTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -111,7 +158,7 @@ export default function ChatPanel({
         <div className="flex min-w-0 items-center gap-2">
           <button
             onClick={onOpenMenu}
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-text-muted hover:text-white lg:hidden"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-text-muted hover:text-white lg:hidden cursor-pointer"
           >
             <Menu size={20} />
           </button>
@@ -133,14 +180,14 @@ export default function ChatPanel({
               <button
                 onClick={() => setMatchCursor((c) => (c - 1 + matches.length) % matches.length)}
                 disabled={matches.length === 0}
-                className="shrink-0 text-text-faint hover:text-white disabled:opacity-30"
+                className="shrink-0 text-text-faint hover:text-white disabled:opacity-30 cursor-pointer"
               >
                 <ChevronUp size={16} />
               </button>
               <button
                 onClick={() => setMatchCursor((c) => (c + 1) % matches.length)}
                 disabled={matches.length === 0}
-                className="shrink-0 text-text-faint hover:text-white disabled:opacity-30"
+                className="shrink-0 text-text-faint hover:text-white disabled:opacity-30 cursor-pointer"
               >
                 <ChevronDown size={16} />
               </button>
@@ -149,31 +196,69 @@ export default function ChatPanel({
                   setSearchOpen(false);
                   setSearchQuery("");
                 }}
-                className="shrink-0 text-text-faint hover:text-white"
+                className="shrink-0 text-text-faint hover:text-white cursor-pointer"
               >
                 <X size={16} />
               </button>
             </div>
           ) : (
-            <h2 className="truncate text-h1">Book Assistant</h2>
+            <h2 className="truncate text-h1 text-white">{activeConversationTitle}</h2>
           )}
         </div>
 
         {!searchOpen && (
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 relative">
             <button
               onClick={() => setSearchOpen(true)}
-              className="flex h-10 w-10 items-center justify-center rounded-lg text-text-muted hover:text-white"
+              className="flex h-10 w-10 items-center justify-center rounded-lg text-text-muted hover:text-white cursor-pointer"
+              title="Search conversation"
             >
               <Search size={18} />
             </button>
+
             <button
-              onClick={clearChat}
-              title="Clear chat"
-              className="flex h-10 w-10 items-center justify-center rounded-lg bg-rail text-text-muted hover:text-danger"
+              onClick={() => setMenuOpen((o) => !o)}
+              className="flex h-10 w-10 items-center justify-center rounded-lg text-text-muted hover:text-white cursor-pointer"
+              title="Conversation options"
             >
-              <Trash2 size={18} />
+              <MoreHorizontal size={18} />
             </button>
+
+            {menuOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
+                <div className="absolute right-0 top-11 w-48 rounded-xl bg-panel border border-border shadow-xl py-1.5 z-20">
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      handleRename();
+                    }}
+                    className="flex w-full items-center px-4 py-2.5 text-body1 text-white hover:bg-rail transition text-left cursor-pointer"
+                  >
+                    Rename conversation
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      handleExport();
+                    }}
+                    className="flex w-full items-center px-4 py-2.5 text-body1 text-white hover:bg-rail transition text-left cursor-pointer"
+                  >
+                    Export as Markdown
+                  </button>
+                  <div className="border-t border-border my-1" />
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      handleDelete();
+                    }}
+                    className="flex w-full items-center px-4 py-2.5 text-body1 text-danger hover:bg-rail transition text-left cursor-pointer font-medium"
+                  >
+                    Delete conversation
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -207,15 +292,23 @@ export default function ChatPanel({
             <div className="flex flex-col gap-6 pt-10">
               {messages.map((m, i) => {
                 const isMatch = matches.includes(i) && matches[matchCursor] === i;
+                const isLast = i === messages.length - 1;
+                const isEmptyStreamingAssistant =
+                  streaming && isLast && m.role === "assistant" && m.content === "";
+
                 return (
                   <div
                     key={i}
                     ref={(el) => {
                       messageRefs.current[i] = el;
                     }}
-                    className={`rounded-2xl transition ${isMatch ? "ring-2 ring-accent" : ""}`}
+                    className={`rounded-2xl transition animate-message-in ${isMatch ? "ring-2 ring-accent" : ""}`}
                   >
-                    <MessageBubble role={m.role} content={m.content} sources={m.sources} />
+                    {isEmptyStreamingAssistant ? (
+                      <TypingIndicator />
+                    ) : (
+                      <MessageBubble role={m.role} content={m.content} sources={m.sources} />
+                    )}
                   </div>
                 );
               })}
@@ -226,8 +319,14 @@ export default function ChatPanel({
       </div>
 
       <div className="mx-auto w-full max-w-[760px] px-4 pb-6 sm:px-6">
-        <div className="flex items-center gap-2 rounded-2xl bg-rail p-2">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted-bg text-white">
+        <div
+          className={`flex items-center gap-2 rounded-2xl bg-rail p-2 transition-shadow ${streaming ? "ring-1 ring-accent/40" : ""
+            }`}
+        >
+          <div
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted-bg text-white ${streaming ? "animate-pulse" : ""
+              }`}
+          >
             <Sparkles size={16} />
           </div>
           <input
@@ -241,7 +340,11 @@ export default function ChatPanel({
               }
             }}
             placeholder={
-              hasActiveDocument ? "Ask questions, or type '/' for commands" : "Upload and activate a PDF to begin…"
+              hasActiveDocument
+                ? streaming
+                  ? "Generating response…"
+                  : "Ask questions, or type '/' for commands"
+                : "Upload and activate a PDF to begin…"
             }
             className="min-w-0 flex-1 bg-transparent px-1 py-2 text-body1 text-white placeholder:text-text-faint focus:outline-none disabled:cursor-not-allowed"
           />
@@ -257,11 +360,43 @@ export default function ChatPanel({
             disabled={!input.trim() || streaming || !hasActiveDocument}
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent text-white transition disabled:cursor-not-allowed disabled:opacity-30"
           >
-            <ArrowUp size={18} />
+            {streaming ? (
+              <span className="flex h-3 w-3 items-center justify-center">
+                <span className="h-2.5 w-2.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+              </span>
+            ) : (
+              <ArrowUp size={18} />
+            )}
           </button>
         </div>
       </div>
+
+      <style jsx global>{`
+        @keyframes message-in {
+          from {
+            opacity: 0;
+            transform: translateY(6px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        .animate-message-in {
+          animation: message-in 0.25s ease-out;
+        }
+      `}</style>
     </main>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div className="flex items-center gap-1.5 rounded-2xl bg-rail px-4 py-3 w-fit">
+      <span className="h-2 w-2 rounded-full bg-text-faint animate-bounce [animation-delay:-0.3s]" />
+      <span className="h-2 w-2 rounded-full bg-text-faint animate-bounce [animation-delay:-0.15s]" />
+      <span className="h-2 w-2 rounded-full bg-text-faint animate-bounce" />
+    </div>
   );
 }
 

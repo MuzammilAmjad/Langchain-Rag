@@ -22,10 +22,25 @@
   --color-light-bg: #f4f4f4;
 }
 
+[data-theme="light"] {
+  --color-rail: #f0f2f5;
+  --color-panel: #ffffff;
+  --color-border: #d0d5dd;
+  --color-muted-bg: #e4e7ec;
+  --color-text-muted: #475467;
+  --color-text-faint: #667085;
+  /* In light mode, "white" means dark text-on-bg; accent buttons keep #fff via inline style on AI label */
+  --color-white: #101828;
+  --color-black: #f9fafb;
+  --color-danger: #d92d20;
+  --color-warn: #dc6803;
+}
+
 html, body {
   background-color: var(--color-rail);
   color: var(--color-white);
   height: 100%;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 * {

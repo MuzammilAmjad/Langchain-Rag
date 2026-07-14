@@ -29,17 +29,42 @@ class Document(Base):
     uploaded_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+
+
 class Message(Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
     role = Column(String, nullable=False)  # "user" | "assistant"
     content = Column(Text, nullable=False)
     sources = Column(JSON, nullable=True)  # list[{id, source, page, excerpt, namespace}]
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
+    conversation = relationship("Conversation", back_populates="messages")
+
 
 def init_db() -> None:
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if "messages" in inspector.get_table_names():
+        columns = [c["name"] for c in inspector.get_columns("messages")]
+        if "conversation_id" not in columns:
+            # Table is outdated; drop conversations & messages to reset schema.
+            with engine.begin() as conn:
+                if engine.url.drivername.startswith("sqlite"):
+                    conn.execute(text("PRAGMA foreign_keys=OFF;"))
+                conn.execute(text("DROP TABLE IF EXISTS messages;"))
+                conn.execute(text("DROP TABLE IF EXISTS conversations;"))
     Base.metadata.create_all(engine)
 
 

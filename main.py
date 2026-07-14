@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 from typing import Optional
@@ -13,7 +14,7 @@ from langchain_core.output_parsers import StrOutputParser
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from db import Document, Message, get_session, init_db
+from db import Document, Message, Conversation, get_session, init_db
 from rag import (
     RagError,
     MAX_SOURCE_CHUNKS,
@@ -67,6 +68,7 @@ class _UploadAdapter:
 
 class ChatRequest(BaseModel):
     question: str
+    conversation_id: int
 
 
 class DocumentOut(BaseModel):
@@ -163,23 +165,63 @@ def delete_document(namespace: str, purge_vectors: bool = True, db: Session = De
     return {"deleted": namespace}
 
 
-# --- Chat history -------------------------------------------------------
+# --- Conversation & Chat history -----------------------------------------
 
 
-@app.get("/api/chat/history")
-def get_chat_history(db: Session = Depends(get_session)):
-    messages = db.query(Message).order_by(Message.created_at.asc()).all()
+class ConversationPatch(BaseModel):
+    title: str
+
+
+@app.get("/api/conversations")
+def list_conversations(db: Session = Depends(get_session)):
+    conversations = db.query(Conversation).order_by(Conversation.updated_at.desc()).all()
+    return [
+        {"id": c.id, "title": c.title or "New chat", "updated_at": c.updated_at.isoformat()}
+        for c in conversations
+    ]
+
+
+@app.post("/api/conversations")
+def create_conversation(db: Session = Depends(get_session)):
+    c = Conversation(title=None)
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return {"id": c.id, "title": c.title or "New chat", "updated_at": c.updated_at.isoformat()}
+
+
+@app.get("/api/conversations/{id}/messages")
+def get_conversation_messages(id: int, db: Session = Depends(get_session)):
+    conv = db.get(Conversation, id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    messages = db.query(Message).filter(Message.conversation_id == id).order_by(Message.created_at.asc()).all()
     return [
         {"role": m.role, "content": m.content, "sources": m.sources, "created_at": m.created_at.isoformat()}
         for m in messages
     ]
 
 
-@app.delete("/api/chat/history")
-def clear_chat_history(db: Session = Depends(get_session)):
-    db.query(Message).delete()
+@app.delete("/api/conversations/{id}")
+def delete_conversation(id: int, db: Session = Depends(get_session)):
+    conv = db.get(Conversation, id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    db.delete(conv)
     db.commit()
-    return {"cleared": True}
+    return {"deleted": id}
+
+
+@app.patch("/api/conversations/{id}")
+def rename_conversation(id: int, patch: ConversationPatch, db: Session = Depends(get_session)):
+    conv = db.get(Conversation, id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv.title = patch.title
+    conv.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    db.refresh(conv)
+    return {"id": conv.id, "title": conv.title, "updated_at": conv.updated_at.isoformat()}
 
 
 # --- Chat (multi-namespace retrieval) ------------------------------------
@@ -220,7 +262,7 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-async def _stream_answer(question: str, history_text: str, active_namespaces: list[str], db: Session):
+async def _stream_answer(question: str, history_text: str, active_namespaces: list[str], conversation_id: int, db: Session):
     if not active_namespaces:
         yield _sse({"type": "error", "message": "No active documents to search. Upload or activate at least one."})
         return
@@ -261,21 +303,34 @@ async def _stream_answer(question: str, history_text: str, active_namespaces: li
     yield _sse({"type": "sources", "sources": sources})
     yield _sse({"type": "done"})
 
-    db.add(Message(role="user", content=question))
-    db.add(Message(role="assistant", content=full_answer, sources=sources))
+    db.add(Message(role="user", content=question, conversation_id=conversation_id))
+    db.add(Message(role="assistant", content=full_answer, sources=sources, conversation_id=conversation_id))
+    
+    conv = db.get(Conversation, conversation_id)
+    if conv:
+        conv.updated_at = datetime.datetime.utcnow()
+        if not conv.title:
+            title = question.strip()
+            if len(title) > 40:
+                title = title[:37] + "..."
+            conv.title = title
     db.commit()
 
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest, db: Session = Depends(get_session)):
+    conv = db.get(Conversation, request.conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
     active_docs = db.query(Document).filter(Document.active.is_(True)).all()
     active_namespaces = [d.namespace for d in active_docs]
 
-    history_rows = db.query(Message).order_by(Message.created_at.asc()).all()
+    history_rows = db.query(Message).filter(Message.conversation_id == request.conversation_id).order_by(Message.created_at.asc()).all()
     history_text = "\n".join(f"{m.role.title()}: {m.content}" for m in history_rows)
 
     return StreamingResponse(
-        _stream_answer(request.question, history_text, active_namespaces, db),
+        _stream_answer(request.question, history_text, active_namespaces, request.conversation_id, db),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
