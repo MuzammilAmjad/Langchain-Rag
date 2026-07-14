@@ -5,34 +5,36 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from langchain_core.documents import Document as LCDocument
 from langchain_core.output_parsers import StrOutputParser
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
+from db import Document, Message, get_session, init_db
 from rag import (
-    RagArtifacts,
     RagError,
     MAX_SOURCE_CHUNKS,
+    RETRIEVER_TOP_K,
     build_answer_chain,
     build_condense_question_prompt,
-    build_query_artifacts,
     build_retriever,
     file_signature,
     format_sources,
     get_llm,
-    load_knowledge_base_manifest,
+    get_pinecone_index,
+    get_vectorstore,
     safe_namespace,
-    save_knowledge_base_manifest,
     save_uploaded_pdf,
     unique_documents,
 )
 
 load_dotenv()
+init_db()
 
 UPLOAD_DIR = Path("uploads")
-MANIFEST_PATH = UPLOAD_DIR / "active_knowledge_base.json"
 
 app = FastAPI(title="Book Assistant RAG API")
 
@@ -44,16 +46,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# --- In-memory app state (single active knowledge base, mirrors the old
-# st.session_state usage in app.py) ---
-class _State:
-    artifacts: Optional[RagArtifacts] = None
-    pdf_name: Optional[str] = None
-    namespace: Optional[str] = None
-
-
-state = _State()
+# Tracks which namespaces have been indexed this process, purely so upload
+# responses can report fresh counts immediately. Retrieval itself talks to
+# Pinecone directly per namespace (see _retrieve_across_documents) — no
+# retriever object needs to be cached.
 
 
 class _UploadAdapter:
@@ -69,52 +65,31 @@ class _UploadAdapter:
         return self._content
 
 
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-
 class ChatRequest(BaseModel):
     question: str
-    history: list[ChatMessage] = []
 
 
-def _hydrate_from_manifest() -> None:
-    if state.artifacts is not None:
-        return
-    manifest = load_knowledge_base_manifest(MANIFEST_PATH)
-    if not manifest or not manifest.get("namespace"):
-        return
-    try:
-        artifacts = build_query_artifacts(manifest["namespace"])
-    except RagError:
-        return
-    state.artifacts = artifacts
-    state.pdf_name = manifest.get("pdf_name") or Path(manifest["pdf_path"]).name
-    state.namespace = manifest["namespace"]
+class DocumentOut(BaseModel):
+    namespace: str
+    pdf_name: str
+    source_count: int
+    page_count: Optional[int]
+    active: bool
+
+    class Config:
+        from_attributes = True
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    _hydrate_from_manifest()
+# --- Document library -------------------------------------------------
 
 
-@app.get("/api/knowledge-base")
-def get_knowledge_base():
-    _hydrate_from_manifest()
-    if state.artifacts is None:
-        return {"active": False}
-    return {
-        "active": True,
-        "pdf_name": state.pdf_name,
-        "namespace": state.namespace,
-        "source_count": state.artifacts.source_count,
-        "page_count": state.artifacts.page_count,
-    }
+@app.get("/api/documents", response_model=list[DocumentOut])
+def list_documents(db: Session = Depends(get_session)):
+    return db.query(Document).order_by(Document.uploaded_at.desc()).all()
 
 
-@app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+@app.post("/api/documents/upload", response_model=DocumentOut)
+async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_session)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -126,21 +101,88 @@ async def upload_pdf(file: UploadFile = File(...)):
         signature = file_signature(pdf_path)
         namespace = safe_namespace(file.filename, content_signature=signature)
         artifacts = build_retriever(pdf_path, namespace)
-        save_knowledge_base_manifest(MANIFEST_PATH, pdf_path, namespace)
     except RagError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        # The PDF only needed to exist long enough to chunk + index it —
+        # the vectors are what persists (in Pinecone), so don't rely on
+        # this file surviving a redeploy.
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-    state.artifacts = artifacts
-    state.pdf_name = file.filename
-    state.namespace = namespace
+    doc = db.get(Document, namespace)
+    if doc is None:
+        doc = Document(
+            namespace=namespace,
+            pdf_name=file.filename,
+            content_signature=signature,
+            source_count=artifacts.source_count,
+            page_count=artifacts.page_count,
+            active=True,
+        )
+        db.add(doc)
+    else:
+        doc.source_count = artifacts.source_count
+        doc.page_count = artifacts.page_count
+    db.commit()
+    db.refresh(doc)
+    return doc
 
-    return {
-        "active": True,
-        "pdf_name": state.pdf_name,
-        "namespace": state.namespace,
-        "source_count": artifacts.source_count,
-        "page_count": artifacts.page_count,
-    }
+
+class DocumentPatch(BaseModel):
+    active: bool
+
+
+@app.patch("/api/documents/{namespace}", response_model=DocumentOut)
+def set_document_active(namespace: str, patch: DocumentPatch, db: Session = Depends(get_session)):
+    doc = db.get(Document, namespace)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    doc.active = patch.active
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
+@app.delete("/api/documents/{namespace}")
+def delete_document(namespace: str, purge_vectors: bool = True, db: Session = Depends(get_session)):
+    doc = db.get(Document, namespace)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    if purge_vectors:
+        try:
+            get_pinecone_index().delete(delete_all=True, namespace=namespace)
+        except Exception:
+            pass  # namespace may already be empty/gone — non-fatal
+
+    db.delete(doc)
+    db.commit()
+    return {"deleted": namespace}
+
+
+# --- Chat history -------------------------------------------------------
+
+
+@app.get("/api/chat/history")
+def get_chat_history(db: Session = Depends(get_session)):
+    messages = db.query(Message).order_by(Message.created_at.asc()).all()
+    return [
+        {"role": m.role, "content": m.content, "sources": m.sources, "created_at": m.created_at.isoformat()}
+        for m in messages
+    ]
+
+
+@app.delete("/api/chat/history")
+def clear_chat_history(db: Session = Depends(get_session)):
+    db.query(Message).delete()
+    db.commit()
+    return {"cleared": True}
+
+
+# --- Chat (multi-namespace retrieval) ------------------------------------
 
 
 def _condense_question(question: str, chat_history: str) -> str:
@@ -153,61 +195,87 @@ def _condense_question(question: str, chat_history: str) -> str:
         return question
 
 
+def _retrieve_across_documents(query: str, namespaces: list[str]) -> list[LCDocument]:
+    """Runs similarity search against each active document's Pinecone
+    namespace separately (namespaces can't be queried together in one
+    call), tags each hit with which document it came from, then merges
+    and ranks everything together by similarity score."""
+    scored: list[tuple[LCDocument, float]] = []
+
+    for namespace in namespaces:
+        try:
+            vectorstore = get_vectorstore(namespace)
+            hits = vectorstore.similarity_search_with_score(query, k=RETRIEVER_TOP_K)
+        except Exception:
+            continue
+        for doc, score in hits:
+            doc.metadata = {**(doc.metadata or {}), "namespace": namespace}
+            scored.append((doc, score))
+
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    return [doc for doc, _ in scored[:MAX_SOURCE_CHUNKS]]
+
+
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-async def _stream_answer(question: str, history_text: str):
-    if state.artifacts is None:
-        yield _sse({"type": "error", "message": "No knowledge base is indexed yet."})
+async def _stream_answer(question: str, history_text: str, active_namespaces: list[str], db: Session):
+    if not active_namespaces:
+        yield _sse({"type": "error", "message": "No active documents to search. Upload or activate at least one."})
         return
 
     try:
         retrieval_query = _condense_question(question, history_text)
-        documents = state.artifacts.retriever.invoke(retrieval_query)
+        documents = _retrieve_across_documents(retrieval_query, active_namespaces)
     except Exception as exc:
         yield _sse({"type": "error", "message": f"Retrieval failed: {exc}"})
         return
 
     deduped_docs = unique_documents(documents)
-    # cited_docs must match exactly what format_sources numbered [1], [2], ...
-    # so the model's inline [n] brackets line up with the sources sent to the UI.
-    cited_docs = deduped_docs[:MAX_SOURCE_CHUNKS]
     context = format_sources(deduped_docs)
     chain = build_answer_chain()
 
+    full_answer = ""
     try:
         async for chunk in chain.astream(
             {"question": question, "chat_history": history_text, "context": context}
         ):
             if chunk:
+                full_answer += chunk
                 yield _sse({"type": "token", "content": chunk})
     except Exception as exc:
         yield _sse({"type": "error", "message": f"Answer generation failed: {exc}"})
         return
 
+    doc_names = {d.namespace: d.pdf_name for d in db.query(Document).all()}
     sources = [
         {
             "id": index,
-            "source": (doc.metadata or {}).get("source", (doc.metadata or {}).get("file_path", "PDF")),
+            "source": doc_names.get((doc.metadata or {}).get("namespace"), (doc.metadata or {}).get("source", "PDF")),
             "page": (doc.metadata or {}).get("page_number", (doc.metadata or {}).get("page", "?")),
             "excerpt": doc.page_content[:300],
         }
-        for index, doc in enumerate(cited_docs, start=1)
+        for index, doc in enumerate(deduped_docs, start=1)
     ]
     yield _sse({"type": "sources", "sources": sources})
     yield _sse({"type": "done"})
 
+    db.add(Message(role="user", content=question))
+    db.add(Message(role="assistant", content=full_answer, sources=sources))
+    db.commit()
+
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
-    if state.artifacts is None:
-        raise HTTPException(status_code=409, detail="No knowledge base is indexed yet.")
+async def chat(request: ChatRequest, db: Session = Depends(get_session)):
+    active_docs = db.query(Document).filter(Document.active.is_(True)).all()
+    active_namespaces = [d.namespace for d in active_docs]
 
-    history_text = "\n".join(f"{m.role.title()}: {m.content}" for m in request.history)
+    history_rows = db.query(Message).order_by(Message.created_at.asc()).all()
+    history_text = "\n".join(f"{m.role.title()}: {m.content}" for m in history_rows)
 
     return StreamingResponse(
-        _stream_answer(request.question, history_text),
+        _stream_answer(request.question, history_text, active_namespaces, db),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

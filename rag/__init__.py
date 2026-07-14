@@ -13,6 +13,7 @@ from .retriever import (
     split_documents,
 )
 from .vectorstore import (
+    RETRIEVER_TOP_K,
     RagError,
     get_embeddings,
     get_llm,

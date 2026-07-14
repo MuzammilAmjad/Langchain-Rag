@@ -1,11 +1,11 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export interface KnowledgeBase {
+export interface DocumentInfo {
+  namespace: string;
+  pdf_name: string;
+  source_count: number;
+  page_count: number | null;
   active: boolean;
-  pdf_name?: string;
-  namespace?: string;
-  source_count?: number;
-  page_count?: number | null;
 }
 
 export interface SourceCitation {
@@ -15,33 +15,60 @@ export interface SourceCitation {
   excerpt: string;
 }
 
-export interface MessageVersion {
+export interface ChatMessageT {
+  role: "user" | "assistant";
   content: string;
   sources?: SourceCitation[];
 }
 
-export interface ChatMessageT {
-  role: "user" | "assistant";
-  content: string; // for user messages only
-  versions?: MessageVersion[]; // for assistant messages only
-  versionIndex?: number;
-}
-
-export async function getKnowledgeBase(): Promise<KnowledgeBase> {
-  const res = await fetch(`${API_URL}/api/knowledge-base`, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to load knowledge base status");
+export async function listDocuments(): Promise<DocumentInfo[]> {
+  const res = await fetch(`${API_URL}/api/documents`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load documents");
   return res.json();
 }
 
-export async function uploadPdf(file: File): Promise<KnowledgeBase> {
+export async function uploadPdf(file: File): Promise<DocumentInfo> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_URL}/api/upload`, { method: "POST", body: form });
+  const res = await fetch(`${API_URL}/api/documents/upload`, { method: "POST", body: form });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail ?? "Upload failed");
   }
   return res.json();
+}
+
+export async function setDocumentActive(namespace: string, active: boolean): Promise<DocumentInfo> {
+  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(namespace)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ active }),
+  });
+  if (!res.ok) throw new Error("Failed to update document");
+  return res.json();
+}
+
+export async function deleteDocument(namespace: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/documents/${encodeURIComponent(namespace)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error("Failed to delete document");
+}
+
+export async function getChatHistory(): Promise<ChatMessageT[]> {
+  const res = await fetch(`${API_URL}/api/chat/history`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load chat history");
+  const rows: { role: string; content: string; sources: SourceCitation[] | null }[] = await res.json();
+  return rows.map((r) => ({
+    role: r.role as "user" | "assistant",
+    content: r.content,
+    sources: r.sources ?? undefined,
+  }));
+}
+
+export async function clearChatHistory(): Promise<void> {
+  const res = await fetch(`${API_URL}/api/chat/history`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to clear chat");
 }
 
 type StreamEvent =
@@ -52,7 +79,6 @@ type StreamEvent =
 
 export async function streamChat(
   question: string,
-  history: { role: string; content: string }[],
   handlers: {
     onToken: (t: string) => void;
     onSources: (s: SourceCitation[]) => void;
@@ -63,7 +89,7 @@ export async function streamChat(
   const res = await fetch(`${API_URL}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, history }),
+    body: JSON.stringify({ question }),
   });
 
   if (!res.ok || !res.body) {

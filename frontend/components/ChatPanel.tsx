@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   Search,
-  MoreHorizontal,
   MessageSquareText,
   Zap,
   TriangleAlert,
@@ -14,12 +13,20 @@ import {
   X,
   ChevronUp,
   ChevronDown,
+  Trash2,
 } from "lucide-react";
-import { streamChat, KnowledgeBase, ChatMessageT } from "@/lib/api";
+import { streamChat, getChatHistory, clearChatHistory, ChatMessageT } from "@/lib/api";
 import MessageBubble from "@/components/MessageBubble";
 
-export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpenMenu: () => void }) {
+export default function ChatPanel({
+  hasActiveDocument,
+  onOpenMenu,
+}: {
+  hasActiveDocument: boolean;
+  onOpenMenu: () => void;
+}) {
   const [messages, setMessages] = useState<ChatMessageT[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -30,119 +37,72 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
   const [matchCursor, setMatchCursor] = useState(0);
 
   useEffect(() => {
+    getChatHistory()
+      .then(setMessages)
+      .catch(() => setMessages([]))
+      .finally(() => setLoadingHistory(false));
+  }, []);
+
+  useEffect(() => {
     if (!searchOpen) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, searchOpen]);
-
-  const messageText = (m: ChatMessageT) =>
-    m.role === "user" ? m.content : m.versions?.[m.versionIndex ?? 0]?.content ?? "";
 
   const matches = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
     return messages.reduce<number[]>((acc, m, i) => {
-      if (messageText(m).toLowerCase().includes(q)) acc.push(i);
+      if (m.content.toLowerCase().includes(q)) acc.push(i);
       return acc;
     }, []);
   }, [searchQuery, messages]);
 
-  useEffect(() => {
-    setMatchCursor(0);
-  }, [searchQuery]);
+  useEffect(() => setMatchCursor(0), [searchQuery]);
 
   useEffect(() => {
     if (matches.length === 0) return;
-    const idx = matches[matchCursor];
-    messageRefs.current[idx]?.scrollIntoView({ behavior: "smooth", block: "center" });
+    messageRefs.current[matches[matchCursor]]?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [matchCursor, matches]);
-
-  const historyUpTo = (index: number) =>
-    messages.slice(0, index).map((m) => ({ role: m.role, content: messageText(m) }));
 
   const send = async () => {
     const question = input.trim();
-    if (!question || streaming || !kb.active) return;
+    if (!question || streaming || !hasActiveDocument) return;
 
-    const history = historyUpTo(messages.length);
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: question },
-      { role: "assistant", content: "", versions: [{ content: "" }], versionIndex: 0 },
-    ]);
+    setMessages((prev) => [...prev, { role: "user", content: question }, { role: "assistant", content: "" }]);
     setInput("");
     setStreaming(true);
-    await runStream(question, history, messages.length + 1, 0);
-    setStreaming(false);
-  };
 
-  const runStream = async (
-    question: string,
-    history: { role: string; content: string }[],
-    assistantIndex: number,
-    versionIdx: number
-  ) => {
-    await streamChat(question, history, {
+    await streamChat(question, {
       onToken: (t) =>
         setMessages((prev) => {
           const next = [...prev];
-          const msg = { ...next[assistantIndex] };
-          const versions = [...(msg.versions ?? [{ content: "" }])];
-          versions[versionIdx] = { ...versions[versionIdx], content: versions[versionIdx].content + t };
-          msg.versions = versions;
-          next[assistantIndex] = msg;
+          next[next.length - 1] = { ...next[next.length - 1], content: next[next.length - 1].content + t };
           return next;
         }),
       onSources: (sources) =>
         setMessages((prev) => {
           const next = [...prev];
-          const msg = { ...next[assistantIndex] };
-          const versions = [...(msg.versions ?? [{ content: "" }])];
-          versions[versionIdx] = { ...versions[versionIdx], sources };
-          msg.versions = versions;
-          next[assistantIndex] = msg;
+          next[next.length - 1] = { ...next[next.length - 1], sources };
           return next;
         }),
       onError: (message) =>
         setMessages((prev) => {
           const next = [...prev];
-          const msg = { ...next[assistantIndex] };
-          const versions = [...(msg.versions ?? [{ content: "" }])];
-          versions[versionIdx] = { ...versions[versionIdx], content: `⚠️ ${message}` };
-          msg.versions = versions;
-          next[assistantIndex] = msg;
+          next[next.length - 1] = { ...next[next.length - 1], content: `⚠️ ${message}` };
           return next;
         }),
       onDone: () => {},
     });
-  };
 
-  const regenerate = async (assistantIndex: number) => {
-    if (streaming) return;
-    const userMessage = messages[assistantIndex - 1];
-    if (!userMessage || userMessage.role !== "user") return;
-
-    const history = historyUpTo(assistantIndex - 1);
-    const newVersionIdx = messages[assistantIndex].versions?.length ?? 1;
-
-    setMessages((prev) => {
-      const next = [...prev];
-      const msg = { ...next[assistantIndex] };
-      msg.versions = [...(msg.versions ?? []), { content: "" }];
-      msg.versionIndex = newVersionIdx;
-      next[assistantIndex] = msg;
-      return next;
-    });
-
-    setStreaming(true);
-    await runStream(userMessage.content, history, assistantIndex, newVersionIdx);
     setStreaming(false);
   };
 
-  const setVersionIndex = (assistantIndex: number, idx: number) => {
-    setMessages((prev) => {
-      const next = [...prev];
-      next[assistantIndex] = { ...next[assistantIndex], versionIndex: idx };
-      return next;
-    });
+  const clearChat = async () => {
+    try {
+      await clearChatHistory();
+      setMessages([]);
+    } catch {
+      // no-op — leave existing messages visible if the clear failed
+    }
   };
 
   return (
@@ -195,7 +155,7 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
               </button>
             </div>
           ) : (
-            <h2 className="truncate text-h1">{kb.active ? kb.pdf_name : "Book Assistant"}</h2>
+            <h2 className="truncate text-h1">Book Assistant</h2>
           )}
         </div>
 
@@ -207,8 +167,12 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
             >
               <Search size={18} />
             </button>
-            <button className="flex h-10 w-10 items-center justify-center rounded-lg bg-rail text-text-muted hover:text-white">
-              <MoreHorizontal size={18} />
+            <button
+              onClick={clearChat}
+              title="Clear chat"
+              className="flex h-10 w-10 items-center justify-center rounded-lg bg-rail text-text-muted hover:text-danger"
+            >
+              <Trash2 size={18} />
             </button>
           </div>
         )}
@@ -216,29 +180,26 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
 
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto flex min-h-full max-w-[760px] flex-col justify-end px-4 pb-6 sm:px-6">
-          {messages.length === 0 ? (
+          {loadingHistory ? (
+            <div className="flex flex-1 items-center justify-center text-body1 text-text-faint">Loading…</div>
+          ) : messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
               <div>
                 <h1 className="text-h1">Book Assistant</h1>
                 <p className="mt-1 text-body1 text-text-muted">
-                  Start by asking a question and let the assistant search your document.
+                  Start by asking a question and let the assistant search your active documents.
                 </p>
               </div>
-              <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
                 <InfoCard
                   icon={<MessageSquareText size={16} className="text-accent" />}
                   title="Examples"
-                  items={["\"Summarize chapter 2\"", "\"What does the author say about X?\"", "\"List the key definitions\""]}
+                  items={["\"Summarize chapter 2\"", "\"Compare these two documents\"", "\"List the key definitions\""]}
                 />
                 <InfoCard
                   icon={<Zap size={16} className="text-warn" />}
                   title="Capabilities"
-                  items={["Answers grounded in your PDF", "Cites the exact page & excerpt", "Remembers earlier turns"]}
-                />
-                <InfoCard
-                  icon={<TriangleAlert size={16} className="text-danger" />}
-                  title="Limitations"
-                  items={["Only knows the uploaded document", "Won't guess beyond the context", "May miss info split across pages"]}
+                  items={["Searches every active document", "Cites the exact source & page", "Remembers earlier turns"]}
                 />
               </div>
             </div>
@@ -254,18 +215,7 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
                     }}
                     className={`rounded-2xl transition ${isMatch ? "ring-2 ring-accent" : ""}`}
                   >
-                    {m.role === "user" ? (
-                      <MessageBubble role="user" content={m.content} />
-                    ) : (
-                      <MessageBubble
-                        role="assistant"
-                        versions={m.versions ?? [{ content: "" }]}
-                        versionIndex={m.versionIndex ?? 0}
-                        onSetVersion={(idx) => setVersionIndex(i, idx)}
-                        onRegenerate={() => regenerate(i)}
-                        regenerating={streaming}
-                      />
-                    )}
+                    <MessageBubble role={m.role} content={m.content} sources={m.sources} />
                   </div>
                 );
               })}
@@ -282,7 +232,7 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
           </div>
           <input
             value={input}
-            disabled={!kb.active}
+            disabled={!hasActiveDocument}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -290,7 +240,9 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
                 send();
               }
             }}
-            placeholder={kb.active ? "Ask questions, or type '/' for commands" : "Index a PDF in the left panel to begin…"}
+            placeholder={
+              hasActiveDocument ? "Ask questions, or type '/' for commands" : "Upload and activate a PDF to begin…"
+            }
             className="min-w-0 flex-1 bg-transparent px-1 py-2 text-body1 text-white placeholder:text-text-faint focus:outline-none disabled:cursor-not-allowed"
           />
           <button
@@ -302,7 +254,7 @@ export default function ChatPanel({ kb, onOpenMenu }: { kb: KnowledgeBase; onOpe
           </button>
           <button
             onClick={send}
-            disabled={!input.trim() || streaming || !kb.active}
+            disabled={!input.trim() || streaming || !hasActiveDocument}
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent text-white transition disabled:cursor-not-allowed disabled:opacity-30"
           >
             <ArrowUp size={18} />

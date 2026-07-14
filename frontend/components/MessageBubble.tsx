@@ -1,44 +1,37 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, Check, RotateCw, Bookmark, Smile, Frown, ChevronLeft } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Check, Bookmark, Smile, Frown } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { MessageVersion, SourceCitation } from "@/lib/api";
+import { SourceCitation } from "@/lib/api";
 
 function linkifyCitations(text: string): string {
   return text.replace(/\[(\d+)\]/g, (_m, num) => `[${num}](#cite-${num})`);
 }
 
-type Props =
-  | { role: "user"; content: string }
-  | {
-      role: "assistant";
-      versions: MessageVersion[];
-      versionIndex: number;
-      onSetVersion: (idx: number) => void;
-      onRegenerate: () => void;
-      regenerating: boolean;
-    };
-
-export default function MessageBubble(props: Props) {
-  if (props.role === "user") {
+export default function MessageBubble({
+  role,
+  content,
+  sources,
+}: {
+  role: "user" | "assistant";
+  content: string;
+  sources?: SourceCitation[];
+}) {
+  if (role === "user") {
     return (
       <div className="flex justify-end gap-3">
         <div className="max-w-[85%] sm:max-w-[80%]">
           <div className="mb-1 flex items-center justify-end gap-2 text-body1 text-text-faint">
             <span className="text-sub2 text-white">You</span>
           </div>
-          <div className="rounded-2xl rounded-tr-sm bg-white/10 px-4 py-3 text-body1 text-white">
-            {props.content}
-          </div>
+          <div className="rounded-2xl rounded-tr-sm bg-white/10 px-4 py-3 text-body1 text-white">{content}</div>
         </div>
       </div>
     );
   }
 
-  const { versions, versionIndex, onSetVersion, onRegenerate, regenerating } = props;
-  const active = versions[versionIndex] ?? versions[0];
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const [reaction, setReaction] = useState<"up" | "down" | null>(null);
@@ -46,11 +39,11 @@ export default function MessageBubble(props: Props) {
 
   const sourceById = useMemo(() => {
     const map = new Map<number, SourceCitation>();
-    (active.sources ?? []).forEach((s, i) => map.set(s.id ?? i + 1, s));
+    (sources ?? []).forEach((s, i) => map.set(s.id ?? i + 1, s));
     return map;
-  }, [active.sources]);
+  }, [sources]);
 
-  const processedContent = useMemo(() => linkifyCitations(active.content || ""), [active.content]);
+  const processedContent = useMemo(() => linkifyCitations(content || ""), [content]);
 
   const goToSource = (id: number) => {
     setExpanded(true);
@@ -63,7 +56,7 @@ export default function MessageBubble(props: Props) {
   };
 
   const copy = async () => {
-    await navigator.clipboard.writeText(active.content);
+    await navigator.clipboard.writeText(content);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -75,28 +68,7 @@ export default function MessageBubble(props: Props) {
       </div>
 
       <div className="min-w-0 flex-1">
-        <div className="mb-1 flex items-center justify-between">
-          <span className="text-sub2 text-white">Response</span>
-          {versions.length > 1 && (
-            <div className="flex items-center gap-2 text-body1 text-text-faint">
-              <button
-                onClick={() => onSetVersion(Math.max(0, versionIndex - 1))}
-                disabled={versionIndex === 0}
-                className="rounded p-1 hover:bg-panel disabled:opacity-30"
-              >
-                <ChevronLeft size={15} />
-              </button>
-              {versionIndex + 1}/{versions.length}
-              <button
-                onClick={() => onSetVersion(Math.min(versions.length - 1, versionIndex + 1))}
-                disabled={versionIndex === versions.length - 1}
-                className="rounded p-1 hover:bg-panel disabled:opacity-30"
-              >
-                <ChevronRight size={15} />
-              </button>
-            </div>
-          )}
-        </div>
+        <div className="mb-1 text-sub2 text-white">Response</div>
 
         <div className="rounded-2xl rounded-tl-sm bg-rail px-4 py-3 sm:px-5 sm:py-4">
           <div className="prose prose-invert prose-sm max-w-none text-body1 leading-relaxed text-white">
@@ -151,14 +123,6 @@ export default function MessageBubble(props: Props) {
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={onRegenerate}
-                disabled={regenerating}
-                className="flex h-9 items-center gap-1.5 rounded-lg bg-muted-bg px-3 text-body1 font-medium text-white transition hover:opacity-90 disabled:opacity-40"
-              >
-                <RotateCw size={14} />
-                Generate Response
-              </button>
-              <button
                 onClick={copy}
                 className="flex h-9 items-center gap-1.5 rounded-lg bg-muted-bg px-3 text-body1 font-medium text-white transition hover:opacity-90"
               >
@@ -172,18 +136,18 @@ export default function MessageBubble(props: Props) {
           </div>
         </div>
 
-        {active.sources && active.sources.length > 0 && (
+        {sources && sources.length > 0 && (
           <div className="mt-2">
             <button
               onClick={() => setExpanded((v) => !v)}
               className="flex items-center gap-1.5 text-body1 text-text-faint transition hover:text-white"
             >
               {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-              Grounding Context Citations ({active.sources.length})
+              Grounding Context Citations ({sources.length})
             </button>
             {expanded && (
               <div className="mt-2 space-y-2">
-                {active.sources.map((s, i) => {
+                {sources.map((s, i) => {
                   const id = s.id ?? i + 1;
                   return (
                     <div
