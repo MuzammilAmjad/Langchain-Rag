@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -39,14 +40,20 @@ UPLOAD_DIR = Path("uploads")
 
 app = FastAPI(title="Book Assistant RAG API")
 
+_default_origins = "http://localhost:3000"
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", _default_origins).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # add your deployed frontend origin too
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Tracks which namespaces have been indexed this process, purely so upload
 # responses can report fresh counts immediately. Retrieval itself talks to
 # Pinecone directly per namespace (see _retrieve_across_documents) — no
